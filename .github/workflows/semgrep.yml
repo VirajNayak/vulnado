@@ -48,3 +48,4 @@ jobs:
         with:
           name: report.sarif
           path: report.sarif
+
