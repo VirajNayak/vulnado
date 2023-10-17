@@ -34,33 +34,64 @@ on:
   workflow_dispatch:
 
 permissions:
-  pull-requests: read # allows SonarQube to decorate PRs with analysis results
+    contents: read
+    pull-requests: read # allows SonarQube to decorate PRs with analysis results
 
 jobs:
-  Analysis:
+  sonarqube:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Analyze with SonarQube
+      - name: Checkout code
+        uses: actions/checkout@v3
+        id: code_checkout
 
-        # You can pin the exact commit or the version.
-        # uses: SonarSource/sonarqube-scan-action@v1.1.0
-        uses: SonarSource/sonarqube-scan-action@7295e71c9583053f5bf40e9d4068a0c974603ec8
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # Generate a token on SonarQube, add it to the secrets of this repo with the name SONAR_TOKEN (Settings > Secrets > Actions > add new repository secret)
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}   # add the URL of your instance to the secrets of this repo with the name SONAR_HOST_URL (Settings > Secrets > Actions > add new repository secret)
-        with:
-          # Additional arguments for the sonarcloud scanner
-          args:
-            # Unique key of your project. You can find it in SonarQube > [my project] > Project Information (top-right menu)
-            # mandatory
-            -Dsonar.projectKey=
-            # Comma-separated paths to directories containing main source files.
-            #-Dsonar.sources= # optional, default is project base directory
-            # When you need the analysis to take place in a directory other than the one from which it was launched
-            #-Dsonar.projectBaseDir= # optional, default is .
-            # Comma-separated paths to directories containing test source files.
-            #-Dsonar.tests= # optional. For more info about Code Coverage, please refer to https://docs.sonarcloud.io/enriching/test-coverage/overview/
-            # Adds more detail to both client and server-side analysis logs, activating DEBUG mode for the scanner, and adding client-side environment variables and system properties to the server-side log of analysis report processing.
-            #-Dsonar.verbose= # optional, default is false
+      - name: Start SonarQube Server
+        run: |
+          docker run -d --name qubesonar -p 9000:9000 sonarqube:latest
+      - name: Get Container IP
+        id: get_container_ip
+        run: |
+          CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' qubesonar)
+          echo "::set-output name=container_ip::$CONTAINER_IP"
+          echo "Container IP: $CONTAINER_IP"
+          ABC=${GITHUB_REPOSITORY#*/}
+          echo $ABC
+      
+      - name: Wait for SonarQube Server to Start
+        run: |
+          timeout 300 bash -c 'until wget http://${{ steps.get_container_ip.outputs.container_ip }}:9000/index; do sleep 1; done'
+          sleep 75
+          echo "Done"
+
+      - name: Waiting for the Scans to Complete
+        run: |
+          timeout 500 bash -c 'until wget http://${{ steps.get_container_ip.outputs.container_ip }}:9000/dashboard?id=${GITHUB_REPOSITORY#*/}; do sleep 1; done'
+          sleep 75
+          echo "Done"
+      - name: Generating Local Sonar Token
+        id: get_token
+        run: |
+          gen_token_res=$(curl -u admin:admin -X POST "http://${{ steps.get_container_ip.outputs.container_ip }}:9000/api/user_tokens/generate" -d "name=sonar_token&login=admin&type=GLOBAL_ANALYSIS_TOKEN")
+          token=$(echo $gen_token_res | jq -r '.token')
+          echo "::set-output name=sonar_token::$token"
+
+      - name: Download and Setup sonar-scanner-cli
+        run: |
+          mvn clean install
+          mvn sonar:sonar -Dsonar.token=${{ steps.get_token.outputs.sonar_token }}
+      
+      - name: Fetching the WEB API to Export findings to JSON
+        run: |
+          curl -u ${{ steps.get_token.outputs.sonar_token }} -o result.json "http://${{ steps.get_container_ip.outputs.container_ip }}:9000/api/issues/search?project=${GITHUB_REPOSITORY#*/}"
+          echo "Result File Generated"
+          mv result.json result.sarif
+          
+     # - name: Integrating JIRA and using JSON data to create tickets
+     #   run: |
+     #     security_data=$(jq '.issues | map(select(.type == "Vulnerability"))' result.json)
+     #     echo $security_data
+  
+     # - name: Upload scan reports
+     #   uses: actions/upload-artifact@v3
+     #   with:
+     #     path: result.sarif
